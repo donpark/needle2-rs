@@ -1,0 +1,15 @@
+{
+  "name": "needle2-rs",
+  "version": "0.1.0",
+  "description": "Needle 2 WASM wrapper for browsers and Node.js",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./js/index.d.ts",
+      "import": "./js/index.js"
+    }
+  },
+  "files": ["js", "wasm"],
+  "license": "MIT",
+  "repository": "https://github.com/donpark/needle2-rs"
+}
