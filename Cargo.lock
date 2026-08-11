@@ -377,6 +377,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "needle2-wasm"
+version = "0.1.0"
+dependencies = [
+ "needle2-format",
+ "needle2-infer",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -733,6 +743,8 @@ dependencies = [
  "cfg-if",
  "once_cell",
  "rustversion",
+ "serde",
+ "serde_json",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
 ]
