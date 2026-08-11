@@ -1,5 +1,5 @@
 use needle2_format::CactModel;
-use needle2_infer::{stack_forward, D_MODEL};
+use needle2_infer::{stack_forward, stack_mhc_forward, D_MODEL};
 
 #[test]
 fn runs_the_full_sequential_stack_on_official_model() {
@@ -13,4 +13,7 @@ fn runs_the_full_sequential_stack_on_official_model() {
     let mut output = vec![0.0; D_MODEL];
     stack_forward(&model, &input, 1, &mut output).expect("run stack");
     assert!(output.iter().all(|value| value.is_finite()));
+    let mut mhc_output = vec![0.0; D_MODEL];
+    stack_mhc_forward(&model, &input, 1, &mut mhc_output).expect("run mHC stack");
+    assert!(mhc_output.iter().all(|value| value.is_finite()));
 }

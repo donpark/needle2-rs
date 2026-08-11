@@ -7,7 +7,40 @@ pub const NUM_HEADS: usize = 8;
 pub const NUM_KV_HEADS: usize = 4;
 pub const HEAD_DIM: usize = 64;
 pub const VOCAB_SIZE: usize = 8192;
+pub const MHC_LANES: usize = 4;
 pub const ROPE_THETA: f32 = 100_000.0;
+
+pub struct MhcWeights {
+    pub a_pre: Vec<f32>,
+    pub a_post: Vec<f32>,
+    pub a_res: Vec<f32>,
+    pub b_pre: Vec<f32>,
+    pub b_post: Vec<f32>,
+    pub b_res: Vec<f32>,
+    pub phi_pre: Vec<f32>,
+    pub phi_post: Vec<f32>,
+    pub phi_res: Vec<f32>,
+}
+
+impl MhcWeights {
+    pub fn from_cact(
+        model: &needle2_format::CactModel<'_>,
+    ) -> Result<Self, needle2_format::CactError> {
+        let base = LAYER_TENSOR_START + NUM_LAYERS * 14;
+        let get = |offset| model.tensor_f32(base + offset);
+        Ok(Self {
+            a_pre: get(0)?,
+            a_post: get(1)?,
+            a_res: get(2)?,
+            b_pre: get(3)?,
+            b_post: get(4)?,
+            b_res: get(5)?,
+            phi_pre: get(6)?,
+            phi_post: get(7)?,
+            phi_res: get(8)?,
+        })
+    }
+}
 
 pub struct LayerWeights {
     pub norm_in: Vec<f32>,
@@ -121,6 +154,132 @@ pub fn matvec(weights: &[f32], rows: usize, cols: usize, x: &[f32], out: &mut [f
             .map(|(w, v)| w * v)
             .sum();
     }
+}
+
+fn rms_unit(x: &[f32], out: &mut [f32]) {
+    let mean = x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
+    let scale = (mean + 1e-6).sqrt().recip();
+    for (dst, value) in out.iter_mut().zip(x) {
+        *dst = value * scale;
+    }
+}
+
+fn sinkhorn(logits: &[f32], lanes: usize, out: &mut [f32]) {
+    out.copy_from_slice(logits);
+    for _ in 0..20 {
+        for row in out.chunks_exact_mut(lanes) {
+            let m = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let z = row.iter().map(|v| (*v - m).exp()).sum::<f32>().ln() + m;
+            row.iter_mut().for_each(|v| *v -= z);
+        }
+        for col in 0..lanes {
+            let m = (0..lanes)
+                .map(|row| out[row * lanes + col])
+                .fold(f32::NEG_INFINITY, f32::max);
+            let z = (0..lanes)
+                .map(|row| (out[row * lanes + col] - m).exp())
+                .sum::<f32>()
+                .ln()
+                + m;
+            for row in 0..lanes {
+                out[row * lanes + col] -= z;
+            }
+        }
+    }
+    out.iter_mut().for_each(|v| *v = v.exp());
+}
+
+pub fn stack_mhc_forward(
+    model: &needle2_format::CactModel<'_>,
+    x: &[f32],
+    seq_len: usize,
+    out: &mut [f32],
+) -> Result<(), needle2_format::CactError> {
+    assert_eq!(x.len(), seq_len * D_MODEL);
+    assert_eq!(out.len(), x.len());
+    let mhc = MhcWeights::from_cact(model)?;
+    let mut state = vec![0.0; seq_len * MHC_LANES * D_MODEL];
+    for t in 0..seq_len {
+        for lane in 0..MHC_LANES {
+            state[(t * MHC_LANES + lane) * D_MODEL..(t * MHC_LANES + lane + 1) * D_MODEL]
+                .copy_from_slice(&x[t * D_MODEL..(t + 1) * D_MODEL]);
+        }
+    }
+    let mut flat_norm = vec![0.0; MHC_LANES * D_MODEL];
+    let mut hpre = vec![0.0; MHC_LANES];
+    let mut hpost = vec![0.0; MHC_LANES];
+    let mut res_logits = vec![0.0; MHC_LANES * MHC_LANES];
+    let mut res_mix = vec![0.0; res_logits.len()];
+    for layer in 0..NUM_LAYERS {
+        let weights = LayerWeights::from_cact(model, layer)?;
+        let mut next = vec![0.0; state.len()];
+        for t in 0..seq_len {
+            let start = t * MHC_LANES * D_MODEL;
+            let lanes = &state[start..start + MHC_LANES * D_MODEL];
+            rms_unit(lanes, &mut flat_norm);
+            for lane in 0..MHC_LANES {
+                let row = &mhc.phi_pre[(layer * MHC_LANES + lane) * MHC_LANES * D_MODEL
+                    ..(layer * MHC_LANES + lane + 1) * MHC_LANES * D_MODEL];
+                let score = mhc.a_pre[layer]
+                    * row.iter().zip(&flat_norm).map(|(a, b)| a * b).sum::<f32>()
+                    + mhc.b_pre[layer * MHC_LANES + lane]
+                    + if lane == layer % MHC_LANES { 4.0 } else { -4.0 };
+                hpre[lane] = 1.0 / (1.0 + (-score).exp());
+            }
+            let mut selected = vec![0.0; D_MODEL];
+            for lane in 0..MHC_LANES {
+                for d in 0..D_MODEL {
+                    selected[d] += hpre[lane] * lanes[lane * D_MODEL + d];
+                }
+            }
+            let mut block = vec![0.0; D_MODEL];
+            block_forward(&selected, 1, &weights, &mut block);
+            for d in 0..D_MODEL {
+                block[d] -= selected[d];
+            }
+            for lane in 0..MHC_LANES {
+                let row = &mhc.phi_post[(layer * MHC_LANES + lane) * MHC_LANES * D_MODEL
+                    ..(layer * MHC_LANES + lane + 1) * MHC_LANES * D_MODEL];
+                let score = mhc.a_post[layer]
+                    * row.iter().zip(&flat_norm).map(|(a, b)| a * b).sum::<f32>()
+                    + mhc.b_post[layer * MHC_LANES + lane]
+                    + if lane == layer % MHC_LANES { 0.0 } else { -4.0 };
+                hpost[lane] = 2.0 / (1.0 + (-score).exp());
+            }
+            let phi = &mhc.phi_res[(layer * MHC_LANES * MHC_LANES) * MHC_LANES * D_MODEL
+                ..(layer * MHC_LANES * MHC_LANES + MHC_LANES * MHC_LANES) * MHC_LANES * D_MODEL];
+            for r in 0..MHC_LANES * MHC_LANES {
+                res_logits[r] = mhc.a_res[layer]
+                    * phi[r * MHC_LANES * D_MODEL..(r + 1) * MHC_LANES * D_MODEL]
+                        .iter()
+                        .zip(&flat_norm)
+                        .map(|(a, b)| a * b)
+                        .sum::<f32>()
+                    + mhc.b_res[(layer * MHC_LANES * MHC_LANES) + r];
+            }
+            sinkhorn(&res_logits, MHC_LANES, &mut res_mix);
+            for lane in 0..MHC_LANES {
+                for d in 0..D_MODEL {
+                    let mut value = 0.0;
+                    for src in 0..MHC_LANES {
+                        value += res_mix[lane * MHC_LANES + src] * lanes[src * D_MODEL + d];
+                    }
+                    next[start + lane * D_MODEL + d] = value + hpost[lane] * block[d];
+                }
+            }
+        }
+        state = next;
+    }
+    for t in 0..seq_len {
+        let mut mean = vec![0.0; D_MODEL];
+        for lane in 0..MHC_LANES {
+            for d in 0..D_MODEL {
+                mean[d] += state[(t * MHC_LANES + lane) * D_MODEL + d] / MHC_LANES as f32;
+            }
+        }
+        out[t * D_MODEL..(t + 1) * D_MODEL].copy_from_slice(&mean);
+    }
+    Ok(())
 }
 
 pub fn stack_forward(
