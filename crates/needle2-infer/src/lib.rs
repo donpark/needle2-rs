@@ -393,6 +393,35 @@ pub fn render_tool_prompt(tools_json: &str, query: &str) -> String {
     format!("<|im_start|>user\\n<tools>{tools_json}</tools>\\n{query}<|im_end|>\\n<|im_start|>assistant\\n")
 }
 
+pub fn decode_tool_calls(text: &str) -> Result<Vec<serde_json::Value>, String> {
+    let body = text
+        .split_once("<tool_call>")
+        .map(|(_, rest)| rest)
+        .unwrap_or(text);
+    let body = body
+        .split_once("</tool_call>")
+        .map(|(body, _)| body)
+        .unwrap_or(body)
+        .trim();
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|error| error.to_string())?;
+    match value {
+        serde_json::Value::Array(calls) => Ok(calls),
+        serde_json::Value::Object(_) => Ok(vec![value]),
+        _ => Err("tool call payload must be an object or array".into()),
+    }
+}
+
+pub fn generate_tool_calls(
+    model: &needle2_format::CactModel<'_>,
+    tools_json: &str,
+    query: &str,
+    max_new_tokens: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let text =
+        generate_greedy(model, tools_json, query, max_new_tokens).map_err(|e| e.to_string())?;
+    decode_tool_calls(&text)
+}
+
 pub fn generate_greedy(
     model: &needle2_format::CactModel<'_>,
     tools_json: &str,
@@ -808,6 +837,23 @@ mod tests {
             &mut out,
         );
         assert_eq!(out, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn decodes_single_and_multiple_tool_calls() {
+        assert_eq!(
+            decode_tool_calls("<tool_call>{\"name\":\"weather\"}</tool_call>")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            decode_tool_calls("[{\"name\":\"a\"},{\"name\":\"b\"}]")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(decode_tool_calls("null").is_err());
     }
 
     #[test]

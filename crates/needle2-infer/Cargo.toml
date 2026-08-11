@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 needle2-format = { path = "../needle2-format" }
+serde_json = "1"
 
 [dev-dependencies]
 serde_json = "1"
