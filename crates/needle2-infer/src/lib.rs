@@ -393,6 +393,42 @@ pub fn render_tool_prompt(tools_json: &str, query: &str) -> String {
     format!("<|im_start|>user\\n<tools>{tools_json}</tools>\\n{query}<|im_end|>\\n<|im_start|>assistant\\n")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCall {
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+pub fn normalize_tool_calls(calls: &[serde_json::Value]) -> Result<Vec<ToolCall>, String> {
+    calls
+        .iter()
+        .map(|call| {
+            let object = call
+                .as_object()
+                .ok_or_else(|| "tool call must be an object".to_string())?;
+            let object = object
+                .get("function")
+                .and_then(|value| value.as_object())
+                .unwrap_or(object);
+            let name = object
+                .get("name")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "tool call missing name".to_string())?;
+            let arguments = object
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if !arguments.is_object() {
+                return Err("tool arguments must be an object".into());
+            }
+            Ok(ToolCall {
+                name: name.to_string(),
+                arguments,
+            })
+        })
+        .collect()
+}
+
 pub fn decode_tool_calls(text: &str) -> Result<Vec<serde_json::Value>, String> {
     let body = text
         .split_once("<tool_call>")
@@ -420,24 +456,12 @@ pub fn validate_tool_calls(calls: &[serde_json::Value], tools_json: &str) -> Res
     let tools = tools
         .as_array()
         .ok_or_else(|| "tools must be an array".to_string())?;
-    for call in calls {
-        let object = call
-            .as_object()
-            .ok_or_else(|| "tool call must be an object".to_string())?;
-        let name = object
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "tool call missing name".to_string())?;
+    for call in normalize_tool_calls(calls)? {
         if !tools
             .iter()
-            .any(|tool| tool.get("name").and_then(|v| v.as_str()) == Some(name))
+            .any(|tool| tool.get("name").and_then(|v| v.as_str()) == Some(&call.name))
         {
-            return Err(format!("unknown tool: {name}"));
-        }
-        if let Some(arguments) = object.get("arguments") {
-            if !arguments.is_object() {
-                return Err("tool arguments must be an object".into());
-            }
+            return Err(format!("unknown tool: {}", call.name));
         }
     }
     Ok(())
@@ -897,6 +921,11 @@ mod tests {
         let tools = "[{\"name\":\"weather\"}]";
         assert!(validate_tool_calls(&[serde_json::json!({"name":"weather"})], tools).is_ok());
         assert!(validate_tool_calls(&[serde_json::json!({"name":"unknown"})], tools).is_err());
+        let normalized = normalize_tool_calls(&[serde_json::json!({
+            "function": {"name": "weather", "arguments": {"city": "Lagos"}}
+        })])
+        .unwrap();
+        assert_eq!(normalized[0].name, "weather");
     }
 
     #[test]
