@@ -26,6 +26,8 @@ pub struct LayerWeights {
     pub d3: Vec<f32>,
 }
 
+pub const LAYER_TENSOR_START: usize = 1;
+
 impl LayerWeights {
     pub fn from_cact(
         model: &needle2_format::CactModel<'_>,
@@ -119,6 +121,35 @@ pub fn matvec(weights: &[f32], rows: usize, cols: usize, x: &[f32], out: &mut [f
             .map(|(w, v)| w * v)
             .sum();
     }
+}
+
+pub fn stack_forward(
+    model: &needle2_format::CactModel<'_>,
+    x: &[f32],
+    seq_len: usize,
+    out: &mut [f32],
+) -> Result<(), needle2_format::CactError> {
+    assert_eq!(x.len(), seq_len * D_MODEL);
+    assert_eq!(out.len(), x.len());
+    let mut state = x.to_vec();
+    let mut next = vec![0.0; state.len()];
+    for layer in 0..NUM_LAYERS {
+        let weights = LayerWeights::from_cact(model, layer)?;
+        block_forward(&state, seq_len, &weights, &mut next);
+        std::mem::swap(&mut state, &mut next);
+    }
+    // Six mHC scalar/vector tensors plus three packed projection tensors,
+    // followed by two engram sites (four tensors each).
+    let final_norm = model.tensor_f32(LAYER_TENSOR_START + NUM_LAYERS * 14 + 9 + 8)?;
+    for t in 0..seq_len {
+        zc_rms_norm(
+            &state[t * D_MODEL..(t + 1) * D_MODEL],
+            &final_norm,
+            1e-6,
+            &mut out[t * D_MODEL..(t + 1) * D_MODEL],
+        );
+    }
+    Ok(())
 }
 
 pub fn attention_block(x: &[f32], seq_len: usize, weights: &LayerWeights, out: &mut [f32]) {
