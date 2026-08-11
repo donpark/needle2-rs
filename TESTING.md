@@ -1,69 +1,93 @@
-# Needle 2 compatibility testing
+# Needle 2 testing
 
-The compatibility target is the official `Cactus-Compute/needle2.cact` model and
-native `cactus-needle` reference implementation. bside models are not required
-for these tests.
+The transparent Needle 2 implementation is tested independently of bside
+against the official `Cactus-Compute/needle2.cact` artifact and the public
+Cactus Python implementation where reference values are available.
 
-## Test matrix
-
-1. **Artifact loading** — valid `.cact` loads; truncated/invalid bytes fail.
-2. **Schema initialization** — one tool, multiple tools, OpenAI JSON Schema,
-   empty tools, and a null tool-index path.
-3. **Reference routing** — compare `function_calls`, arguments, and empty-call
-   behavior against the native implementation for fixed query/tool fixtures.
-4. **Lifecycle** — completion, reset, reinitialization, and a second model load.
-5. **Limits** — long queries, output-capacity exhaustion, and malformed model data.
-6. **Browser integration** — execute the same cases through the ESM wrapper in a
-   real browser over HTTP (not `file:`).
-
-## Current checks
-
-Rust implementation checks:
+## Full suite
 
 ```bash
 cargo test --workspace --exclude needle-wasm --exclude needle-python
 ```
 
-Browser smoke check:
+This covers the existing Needle 1 runtime plus the new Needle 2 crates. A
+non-fatal unreachable-code warning in the legacy `needle-core` quantization
+module is currently expected.
+
+## Real model
 
 ```bash
-python3 -m http.server 8080
-# copy a real model to tests/weights/model.cact
-# open tests/browser-smoke.html?model=weights/model.cact
+export NEEDLE2_CACT=/path/to/needle2.cact
+cargo test -p needle2-format --test cact -- --nocapture
+cargo test -p needle2-infer --test block -- --nocapture
+cargo test -p needle2-infer --test stack -- --nocapture
 ```
 
-The smoke page verifies loading, initialization, valid completion JSON, tool-name
-constraints when a call is returned, reset, and a second completion.
+These tests exercise the actual official model rather than a mock fixture.
+They verify `.cact` loading, tokenizer IDs, tensor decoding, a complete block,
+the 27-layer stack, mHC lane mixing, Engram loading/injection, and logits.
 
-## Reference case
+## Reference coverage
 
-With the official native Python package (`cactus-needle 2.0.0`),
-`needle2.cact`, and:
+Reference fixtures cover:
 
-```json
-[{"name":"get_weather","description":"Get the current weather for a city","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]
+- embedded tokenizer IDs;
+- FP16/FP32 conversion;
+- CQ tensor values;
+- RMSNorm;
+- RoPE;
+- Hadamard transform and MLP;
+- Engram hashing;
+- attention-block outputs;
+- prompt rendering;
+- JSON/tool-call parsing and validation.
+
+The full stack currently has execution coverage on the official artifact. Full
+native hidden-state/logit parity for every mHC and Engram path remains a future
+numerical-validation task; do not describe the project as native-compatible
+without that comparison.
+
+## WASM
+
+Install the target and matching binding tool:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install -f wasm-bindgen-cli --version 0.2.121
 ```
 
-this query returns a call:
+Check and build:
 
-```text
-what's it like in Lagos right now?
+```bash
+cargo check -p needle2-wasm --target wasm32-unknown-unknown
+cargo build -p needle2-wasm --target wasm32-unknown-unknown --release
+wasm-bindgen target/wasm32-unknown-unknown/release/needle2_wasm.wasm \
+  --target web --out-dir dist/needle2-wasm
 ```
 
-Expected native result includes:
+The generated browser API is `Needle2Runtime`, which owns the model bytes and
+exposes `complete(toolsJson, query, maxNewTokens)` and `reset()`.
 
-```json
-{"name":"get_weather","arguments":{"city":"Lagos"}}
+## Browser smoke test
+
+Serve the repository over HTTP. The existing legacy browser smoke pages test
+the official adapter and are not tests of the new transparent WASM ABI yet.
+For the transparent ABI, use the generated bindings and a real `.cact` model:
+
+```js
+import init, { Needle2Runtime } from "./needle2-wasm/needle2_wasm.js";
+await init();
+const model = new Uint8Array(await (await fetch("needle2.cact")).arrayBuffer());
+const runtime = new Needle2Runtime(model);
+const calls = runtime.complete(JSON.stringify(tools), query, 32);
 ```
 
-## Current blocker
+## Known limitations
 
-The same model, tool schema, and query run through the official browser WASM
-artifact (`wasm/needle.wasm`) return a valid response with an empty
-`function_calls` array and confidence `0.2`. This reproduces when calling the
-official Emscripten module directly, bypassing `needle2-rs`, so it is not a
-JavaScript wrapper parsing issue.
-
-Until this native-vs-WASM discrepancy is resolved, the project must not claim
-full Needle 2 model parity. The wrapper is artifact/load/lifecycle tested, but
-semantic routing parity remains failing.
+- Scalar CQ decoding and full-token recomputation make inference slow.
+- The browser ABI is built and bindgen-tested, but a committed browser
+  end-to-end test is still needed.
+- Confidence pooling primitives and confidence-head tensor loading exist, but
+  full hidden-cell collection is not wired into the public completion result.
+- Token-level constrained decoding currently validates JSON structure and tool
+  schemas; it is not a complete JSON-Schema grammar compiler.

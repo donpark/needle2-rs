@@ -1,92 +1,105 @@
 # needle2-rs
 
-A small ESM JavaScript wrapper around Cactus Compute's official Needle 2
-WASM runtime. It loads a Needle 2 `.cact` model and exposes tool routing in
-browsers and other ESM environments with browser-compatible `fetch`.
+Transparent Rust/WASM Needle 2 runtime for official Cactus `.cact` models.
+Needle 2 is implemented in the `needle2-format`, `needle2-infer`, and
+`needle2-wasm` crates. The existing Needle 1 crates and runtime remain
+separate.
 
-This repository is a deployment adapter. It does not reimplement the model,
-tokenizer, quantization, or training pipeline.
+## Status
 
-## STATUS
+Experimental, but the real official `Cactus-Compute/needle2.cact` artifact is
+parsed and executed by the Rust implementation. Component tests cover the
+format, tokenizer, quantized tensors, attention, MLP, mHC, Engram, logits,
+tool generation, and WASM compilation.
 
-AI-generated so completely **EXPERIMENTAL!**.
+The scalar implementation is correctness-first and currently slow because
+completion recomputes the model for each generated token.
 
-## API
+## Crates
 
-```js
-import { Needle2Engine } from "needle2-rs";
+- `needle2-format` — `.cact` header, tensor directory, tokenizer, and tensor
+  decoding.
+- `needle2-infer` — Needle 2 math, blocks, mHC/Engram stack, logits, prompt
+  rendering, constrained generation, and tool-call validation.
+- `needle2-wasm` — transparent browser-facing WASM API.
+- `needle-*` — existing Needle 1 implementation; unchanged.
 
-const model = new Uint8Array(
-  await fetch("/weights/bside.cact").then(response => response.arrayBuffer())
-);
+## Native Rust usage
 
-const engine = await Needle2Engine.load(model, {
-  wasmUrl: "/wasm/needle.wasm",
-});
+The core API accepts a parsed `CactModel`:
 
-engine.init("", [{
-  name: "get_weather",
-  description: "Get the weather",
-  parameters: {
-    type: "object",
-    properties: { city: { type: "string" } },
-  },
-}]);
+```rust
+use needle2_format::CactModel;
+use needle2_infer::infer_logits;
 
-const result = engine.complete("What is the weather in Paris?");
-// { function_calls: [{ name: "get_weather", arguments: {...} }] }
+let bytes = std::fs::read("needle2.cact")?;
+let model = CactModel::parse(&bytes)?;
+let tokens = vec![2, 101];
+let mut logits = vec![0.0; tokens.len() * needle2_infer::VOCAB_SIZE];
+infer_logits(&model, &tokens, &mut logits)?;
 ```
 
-`Needle2Engine.load()` accepts an `ArrayBuffer` or `Uint8Array`. The model and
-WASM runtime are separate assets. `wasmUrl` must resolve to the runtime file;
-applications should use their asset URL mechanism (for example,
-`chrome.runtime.getURL()` in an MV3 extension).
+Tool generation is available through `generate_tool_calls`; it renders the
+official tool prompt, performs constrained greedy generation, parses the JSON,
+and validates tool names and argument shape.
 
-The wrapper supports the official runtime's `.cact` format, including embedded
-tokenizer metadata and mixed quantization. It does not accept the older
-SafeTensors + `vocab.txt` format.
+## WASM build
 
-## Runtime support
+Install the target and matching binding tool:
 
-The shipped Emscripten loader is browser/bundler-first and uses `fetch` to load
-WASM. Node consumers should provide a browser-compatible fetchable URL or use
-the official Cactus native package. A local `file:` URL is not a supported WASM
-loading path.
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install -f wasm-bindgen-cli --version 0.2.121
+```
 
-## Verification
+Build browser bindings:
 
-The Rust implementation has unit, functional, constrained-decoder, FFI, and
-reference-vector tests:
+```bash
+cargo build -p needle2-wasm --target wasm32-unknown-unknown --release
+wasm-bindgen target/wasm32-unknown-unknown/release/needle2_wasm.wasm \
+  --target web --out-dir dist/needle2-wasm
+```
+
+Use the persistent browser handle:
+
+```js
+import init, { Needle2Runtime } from "./needle2-wasm/needle2_wasm.js";
+
+await init();
+const bytes = new Uint8Array(await (await fetch("needle2.cact")).arrayBuffer());
+const runtime = new Needle2Runtime(bytes);
+const calls = runtime.complete(JSON.stringify(tools), query, 32);
+```
+
+## Tests
+
+Run the complete native workspace suite (excluding the legacy Python and
+WASM-host crates):
 
 ```bash
 cargo test --workspace --exclude needle-wasm --exclude needle-python
 ```
 
-Tests that need model weights are skipped unless the corresponding reference
-weights are available. The checked-in reference-vector tests do not require a
-model download.
+Run the transparent WASM build checks:
 
-The JavaScript wrapper has a browser smoke page at
-`tests/browser-smoke.html`. Serve the repository over HTTP, copy a real `.cact`
-model into `tests/weights/`, and open:
-
-```text
-http://localhost:8080/tests/browser-smoke.html?model=weights/model.cact
+```bash
+cargo check -p needle2-wasm --target wasm32-unknown-unknown
+cargo build -p needle2-wasm --target wasm32-unknown-unknown --release
 ```
 
-The smoke test verifies runtime loading, `.cact` loading, initialization,
-JSON completion, tool-name validity, reset, and a second completion. It uses
-no mock model.
+For real-model tests, set:
 
-## Model and runtime provenance
+```bash
+export NEEDLE2_CACT=/path/to/needle2.cact
+cargo test -p needle2-format --test cact -- --nocapture
+cargo test -p needle2-infer --test block -- --nocapture
+cargo test -p needle2-infer --test stack -- --nocapture
+```
 
-- Model architecture, training, `.cact` format, and official runtime: Cactus
-  Compute Needle 2.
-- This project: JavaScript/ESM adapter and browser asset loading.
-
-See `docs/needle2-wasm.md` for the browser integration notes.
+See [`TESTING.md`](TESTING.md) and [`crates/needle2-wasm/README.md`](crates/needle2-wasm/README.md)
+for the compatibility and browser-build details.
 
 ## License
 
-MIT for this adapter. Check the upstream Cactus Compute release for the
-license of any model or runtime artifact you redistribute.
+MIT for this project. Check the upstream Cactus Compute release for the
+license of any model redistributed with it.
