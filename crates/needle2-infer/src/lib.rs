@@ -9,6 +9,49 @@ pub const HEAD_DIM: usize = 64;
 pub const VOCAB_SIZE: usize = 8192;
 pub const ROPE_THETA: f32 = 100_000.0;
 
+pub struct LayerWeights {
+    pub norm_in: Vec<f32>,
+    pub q_proj: Vec<f32>,
+    pub k_proj: Vec<f32>,
+    pub v_proj: Vec<f32>,
+    pub q_norm: Vec<f32>,
+    pub k_norm: Vec<f32>,
+    pub gate_proj: Vec<f32>,
+    pub out_proj: Vec<f32>,
+    pub post_norm: Vec<f32>,
+    pub attn_gate: f32,
+    pub pre_hada: Vec<f32>,
+    pub d1: Vec<f32>,
+    pub d2: Vec<f32>,
+    pub d3: Vec<f32>,
+}
+
+impl LayerWeights {
+    pub fn from_cact(
+        model: &needle2_format::CactModel<'_>,
+        layer: usize,
+    ) -> Result<Self, needle2_format::CactError> {
+        let base = 1 + layer * 14;
+        let get = |offset| model.tensor_f32(base + offset);
+        Ok(Self {
+            norm_in: get(0)?,
+            q_proj: get(1)?,
+            k_proj: get(2)?,
+            v_proj: get(3)?,
+            q_norm: get(4)?,
+            k_norm: get(5)?,
+            gate_proj: get(6)?,
+            out_proj: get(7)?,
+            post_norm: get(8)?,
+            attn_gate: get(9)?.first().copied().unwrap_or_default(),
+            pre_hada: get(10)?,
+            d1: get(11)?,
+            d2: get(12)?,
+            d3: get(13)?,
+        })
+    }
+}
+
 pub fn zc_rms_norm(x: &[f32], scale: &[f32], epsilon: f32, out: &mut [f32]) {
     assert_eq!(x.len(), scale.len());
     assert_eq!(x.len(), out.len());
@@ -75,6 +118,145 @@ pub fn matvec(weights: &[f32], rows: usize, cols: usize, x: &[f32], out: &mut [f
             .zip(x)
             .map(|(w, v)| w * v)
             .sum();
+    }
+}
+
+pub fn attention_block(x: &[f32], seq_len: usize, weights: &LayerWeights, out: &mut [f32]) {
+    assert_eq!(x.len(), seq_len * D_MODEL);
+    assert_eq!(out.len(), x.len());
+    let mut normalized = vec![0.0; x.len()];
+    for t in 0..seq_len {
+        zc_rms_norm(
+            &x[t * D_MODEL..(t + 1) * D_MODEL],
+            &weights.norm_in,
+            1e-6,
+            &mut normalized[t * D_MODEL..(t + 1) * D_MODEL],
+        );
+    }
+    let mut q = vec![0.0; seq_len * D_MODEL];
+    let mut k = vec![0.0; seq_len * NUM_KV_HEADS * HEAD_DIM];
+    let mut v = vec![0.0; k.len()];
+    let mut row = vec![0.0; D_MODEL];
+    for t in 0..seq_len {
+        matvec(
+            &weights.q_proj,
+            D_MODEL,
+            D_MODEL,
+            &normalized[t * D_MODEL..(t + 1) * D_MODEL],
+            &mut q[t * D_MODEL..(t + 1) * D_MODEL],
+        );
+        matvec(
+            &weights.k_proj,
+            NUM_KV_HEADS * HEAD_DIM,
+            D_MODEL,
+            &normalized[t * D_MODEL..(t + 1) * D_MODEL],
+            &mut k[t * NUM_KV_HEADS * HEAD_DIM..(t + 1) * NUM_KV_HEADS * HEAD_DIM],
+        );
+        matvec(
+            &weights.v_proj,
+            NUM_KV_HEADS * HEAD_DIM,
+            D_MODEL,
+            &normalized[t * D_MODEL..(t + 1) * D_MODEL],
+            &mut v[t * NUM_KV_HEADS * HEAD_DIM..(t + 1) * NUM_KV_HEADS * HEAD_DIM],
+        );
+    }
+    for h in 0..NUM_HEADS {
+        for t in 0..seq_len {
+            let p = (t * NUM_HEADS + h) * HEAD_DIM;
+            zc_rms_norm(
+                &q[p..p + HEAD_DIM],
+                &weights.q_norm,
+                1e-6,
+                &mut row[..HEAD_DIM],
+            );
+            q[p..p + HEAD_DIM].copy_from_slice(&row[..HEAD_DIM]);
+        }
+    }
+    for h in 0..NUM_KV_HEADS {
+        for t in 0..seq_len {
+            let p = (t * NUM_KV_HEADS + h) * HEAD_DIM;
+            zc_rms_norm(
+                &k[p..p + HEAD_DIM],
+                &weights.k_norm,
+                1e-6,
+                &mut row[..HEAD_DIM],
+            );
+            k[p..p + HEAD_DIM].copy_from_slice(&row[..HEAD_DIM]);
+        }
+    }
+    let (cos, sin) = rope_frequencies(HEAD_DIM, seq_len, ROPE_THETA);
+    for h in 0..NUM_HEADS {
+        for t in 0..seq_len {
+            apply_rope(
+                &mut q[(t * NUM_HEADS + h) * HEAD_DIM..(t * NUM_HEADS + h + 1) * HEAD_DIM],
+                &cos[t * HEAD_DIM / 2..(t + 1) * HEAD_DIM / 2],
+                &sin[t * HEAD_DIM / 2..(t + 1) * HEAD_DIM / 2],
+            );
+        }
+    }
+    for h in 0..NUM_KV_HEADS {
+        for t in 0..seq_len {
+            apply_rope(
+                &mut k[(t * NUM_KV_HEADS + h) * HEAD_DIM..(t * NUM_KV_HEADS + h + 1) * HEAD_DIM],
+                &cos[t * HEAD_DIM / 2..(t + 1) * HEAD_DIM / 2],
+                &sin[t * HEAD_DIM / 2..(t + 1) * HEAD_DIM / 2],
+            );
+        }
+    }
+    // Attention helpers use head-major layout; transpose the token-major projections.
+    let mut qh = vec![0.0; q.len()];
+    let mut kh = vec![0.0; k.len()];
+    let mut vh = vec![0.0; v.len()];
+    for t in 0..seq_len {
+        for h in 0..NUM_HEADS {
+            qh[(h * seq_len + t) * HEAD_DIM..(h * seq_len + t + 1) * HEAD_DIM].copy_from_slice(
+                &q[(t * NUM_HEADS + h) * HEAD_DIM..(t * NUM_HEADS + h + 1) * HEAD_DIM],
+            );
+        }
+        for h in 0..NUM_KV_HEADS {
+            kh[(h * seq_len + t) * HEAD_DIM..(h * seq_len + t + 1) * HEAD_DIM].copy_from_slice(
+                &k[(t * NUM_KV_HEADS + h) * HEAD_DIM..(t * NUM_KV_HEADS + h + 1) * HEAD_DIM],
+            );
+            vh[(h * seq_len + t) * HEAD_DIM..(h * seq_len + t + 1) * HEAD_DIM].copy_from_slice(
+                &v[(t * NUM_KV_HEADS + h) * HEAD_DIM..(t * NUM_KV_HEADS + h + 1) * HEAD_DIM],
+            );
+        }
+    }
+    let mut attended = vec![0.0; q.len()];
+    gqa_attention(
+        &qh,
+        &kh,
+        &vh,
+        NUM_HEADS,
+        NUM_KV_HEADS,
+        seq_len,
+        HEAD_DIM,
+        true,
+        &mut attended,
+    );
+    for t in 0..seq_len {
+        for h in 0..NUM_HEADS {
+            row[h * HEAD_DIM..(h + 1) * HEAD_DIM].copy_from_slice(
+                &attended[(h * seq_len + t) * HEAD_DIM..(h * seq_len + t + 1) * HEAD_DIM],
+            );
+        }
+        matvec(
+            &weights.gate_proj,
+            D_MODEL,
+            D_MODEL,
+            &normalized[t * D_MODEL..(t + 1) * D_MODEL],
+            &mut q[t * D_MODEL..(t + 1) * D_MODEL],
+        );
+        for i in 0..D_MODEL {
+            row[i] *= 1.0 / (1.0 + (-q[t * D_MODEL + i]).exp());
+        }
+        matvec(
+            &weights.out_proj,
+            D_MODEL,
+            D_MODEL,
+            &row,
+            &mut out[t * D_MODEL..(t + 1) * D_MODEL],
+        );
     }
 }
 
