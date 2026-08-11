@@ -1,0 +1,8 @@
+[package]
+name = "needle2-infer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+needle2-format = { path = "../needle2-format" }
