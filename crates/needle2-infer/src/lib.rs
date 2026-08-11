@@ -415,6 +415,34 @@ pub fn decode_tool_calls(text: &str) -> Result<Vec<serde_json::Value>, String> {
     }
 }
 
+pub fn validate_tool_calls(calls: &[serde_json::Value], tools_json: &str) -> Result<(), String> {
+    let tools: serde_json::Value = serde_json::from_str(tools_json).map_err(|e| e.to_string())?;
+    let tools = tools
+        .as_array()
+        .ok_or_else(|| "tools must be an array".to_string())?;
+    for call in calls {
+        let object = call
+            .as_object()
+            .ok_or_else(|| "tool call must be an object".to_string())?;
+        let name = object
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "tool call missing name".to_string())?;
+        if !tools
+            .iter()
+            .any(|tool| tool.get("name").and_then(|v| v.as_str()) == Some(name))
+        {
+            return Err(format!("unknown tool: {name}"));
+        }
+        if let Some(arguments) = object.get("arguments") {
+            if !arguments.is_object() {
+                return Err("tool arguments must be an object".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn generate_tool_calls(
     model: &needle2_format::CactModel<'_>,
     tools_json: &str,
@@ -423,7 +451,9 @@ pub fn generate_tool_calls(
 ) -> Result<Vec<serde_json::Value>, String> {
     let text =
         generate_greedy(model, tools_json, query, max_new_tokens).map_err(|e| e.to_string())?;
-    decode_tool_calls(&text)
+    let calls = decode_tool_calls(&text)?;
+    validate_tool_calls(&calls, tools_json)?;
+    Ok(calls)
 }
 
 pub fn generate_greedy(
@@ -864,6 +894,9 @@ mod tests {
             2
         );
         assert!(decode_tool_calls("null").is_err());
+        let tools = "[{\"name\":\"weather\"}]";
+        assert!(validate_tool_calls(&[serde_json::json!({"name":"weather"})], tools).is_ok());
+        assert!(validate_tool_calls(&[serde_json::json!({"name":"unknown"})], tools).is_err());
     }
 
     #[test]
