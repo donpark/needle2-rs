@@ -480,6 +480,88 @@ pub fn generate_tool_calls(
     Ok(calls)
 }
 
+fn json_prefix_valid(text: &str) -> bool {
+    let Some(start) = text.find(['{', '[']) else {
+        return true;
+    };
+    let mut stack = Vec::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for byte in text[start..].bytes() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => quoted = true,
+            b'{' => stack.push(b'}'),
+            b'[' => stack.push(b']'),
+            b'}' | b']' => {
+                if stack.pop() != Some(byte) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    !quoted
+}
+
+pub fn generate_constrained(
+    model: &needle2_format::CactModel<'_>,
+    tools_json: &str,
+    query: &str,
+    max_new_tokens: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let prompt = render_tool_prompt(tools_json, query);
+    let mut tokens = vec![2u32];
+    tokens.extend(model.tokenizer.encode(&prompt));
+    let mut generated = Vec::new();
+    for _ in 0..max_new_tokens {
+        let mut logits = vec![0.0; tokens.len() * VOCAB_SIZE];
+        infer_logits(model, &tokens, &mut logits).map_err(|e| e.to_string())?;
+        let start = (tokens.len() - 1) * VOCAB_SIZE;
+        let mut ranked: Vec<_> = (0..VOCAB_SIZE).collect();
+        ranked.sort_unstable_by(|&a, &b| logits[start + b].total_cmp(&logits[start + a]));
+        let current = model.tokenizer.decode(&generated);
+        let in_call =
+            current.contains("<tool_call>") || current.contains('{') || current.contains('[');
+        let mut selected = None;
+        for candidate in ranked.into_iter().take(64) {
+            if candidate == 1 {
+                if decode_tool_calls(&current).is_ok() {
+                    selected = Some(candidate as u32);
+                    break;
+                }
+                continue;
+            }
+            let mut trial = generated.clone();
+            trial.push(candidate as u32);
+            let text = model.tokenizer.decode(&trial);
+            if !in_call || json_prefix_valid(&text) {
+                selected = Some(candidate as u32);
+                break;
+            }
+        }
+        let next =
+            selected.ok_or_else(|| "constrained decoder found no valid token".to_string())?;
+        if next == 1 {
+            break;
+        }
+        tokens.push(next);
+        generated.push(next);
+    }
+    let calls = decode_tool_calls(&model.tokenizer.decode(&generated))?;
+    validate_tool_calls(&calls, tools_json)?;
+    Ok(calls)
+}
+
 pub fn generate_greedy(
     model: &needle2_format::CactModel<'_>,
     tools_json: &str,
@@ -895,6 +977,13 @@ mod tests {
             &mut out,
         );
         assert_eq!(out, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn constrained_json_prefix_rejects_mismatched_nesting() {
+        assert!(json_prefix_valid("{\"x\":[1"));
+        assert!(!json_prefix_valid("{\"x\":]"));
+        assert!(!json_prefix_valid("{\"x\":\"unterminated}"));
     }
 
     #[test]
