@@ -14,7 +14,7 @@ fn runs_the_full_sequential_stack_on_official_model() {
     stack_forward(&model, &input, 1, &mut output).expect("run stack");
     assert!(output.iter().all(|value| value.is_finite()));
     let mut mhc_output = vec![0.0; D_MODEL];
-    stack_mhc_forward(&model, &input, 1, &mut mhc_output).expect("run mHC stack");
+    stack_mhc_forward(&model, &[101], &input, 1, &mut mhc_output).expect("run mHC stack");
     assert!(mhc_output.iter().all(|value| value.is_finite()));
     let engram = EngramWeights::from_cact(&model, 0).expect("load engram");
     let mut key = vec![0.0; 3 * D_MODEL];

@@ -267,13 +267,26 @@ fn sinkhorn(logits: &[f32], lanes: usize, out: &mut [f32]) {
 
 pub fn stack_mhc_forward(
     model: &needle2_format::CactModel<'_>,
+    tokens: &[u32],
     x: &[f32],
     seq_len: usize,
     out: &mut [f32],
 ) -> Result<(), needle2_format::CactError> {
+    assert_eq!(tokens.len(), seq_len);
     assert_eq!(x.len(), seq_len * D_MODEL);
     assert_eq!(out.len(), x.len());
     let mhc = MhcWeights::from_cact(model)?;
+    let mut engram_keys = vec![vec![0.0; seq_len * D_MODEL]; ENGRAM_SITES];
+    let mut engram_values = vec![vec![0.0; seq_len * D_MODEL]; ENGRAM_SITES];
+    for site in 0..ENGRAM_SITES {
+        let weights = EngramWeights::from_cact(model, site)?;
+        engram_forward(
+            &tokens,
+            &weights,
+            &mut engram_keys[site],
+            &mut engram_values[site],
+        );
+    }
     let mut state = vec![0.0; seq_len * MHC_LANES * D_MODEL];
     for t in 0..seq_len {
         for lane in 0..MHC_LANES {
@@ -306,6 +319,24 @@ pub fn stack_mhc_forward(
             for lane in 0..MHC_LANES {
                 for d in 0..D_MODEL {
                     selected[d] += hpre[lane] * lanes[lane * D_MODEL + d];
+                }
+            }
+            if layer == 2 || layer == 15 {
+                let site = if layer == 2 { 0 } else { 1 };
+                let mut unit_x = vec![0.0; D_MODEL];
+                let mut unit_k = vec![0.0; D_MODEL];
+                rms_unit(&selected, &mut unit_x);
+                rms_unit(
+                    &engram_keys[site][t * D_MODEL..(t + 1) * D_MODEL],
+                    &mut unit_k,
+                );
+                let alpha = 1.0
+                    / (1.0
+                        + (-unit_x.iter().zip(&unit_k).map(|(a, b)| a * b).sum::<f32>()
+                            / (D_MODEL as f32).sqrt())
+                        .exp());
+                for d in 0..D_MODEL {
+                    selected[d] += alpha * engram_values[site][t * D_MODEL + d];
                 }
             }
             let mut block = vec![0.0; D_MODEL];
