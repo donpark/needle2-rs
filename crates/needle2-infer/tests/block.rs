@@ -41,4 +41,30 @@ fn loads_and_runs_one_real_attention_block() {
         .map(|(a, e)| (a - e).abs())
         .fold(0.0, f32::max);
     assert!(max_diff < 1e-2, "attention max diff {max_diff}");
+
+    let fixture: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(std::env::var("NEEDLE2_BLOCK_FIXTURE").expect("block fixture"))
+            .expect("read block fixture"),
+    )
+    .expect("parse block fixture");
+    let input: Vec<f32> = fixture["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap() as f32)
+        .collect();
+    let expected: Vec<f32> = fixture["expected"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap() as f32)
+        .collect();
+    let mut actual = vec![0.0; input.len()];
+    needle2_infer::block_forward(&input, 2, &weights, &mut actual);
+    let max_diff = actual
+        .iter()
+        .zip(expected)
+        .map(|(a, e)| (a - e).abs())
+        .fold(0.0, f32::max);
+    assert!(max_diff < 1e-2, "block max diff {max_diff}");
 }

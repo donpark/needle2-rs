@@ -260,6 +260,35 @@ pub fn attention_block(x: &[f32], seq_len: usize, weights: &LayerWeights, out: &
     }
 }
 
+pub fn block_forward(x: &[f32], seq_len: usize, weights: &LayerWeights, out: &mut [f32]) {
+    assert_eq!(x.len(), seq_len * D_MODEL);
+    assert_eq!(out.len(), x.len());
+    let mut attention = vec![0.0; x.len()];
+    attention_block(x, seq_len, weights, &mut attention);
+    let mut state = vec![0.0; x.len()];
+    for t in 0..seq_len {
+        let range = t * D_MODEL..(t + 1) * D_MODEL;
+        let mut post = vec![0.0; D_MODEL];
+        zc_rms_norm(
+            &attention[range.clone()],
+            &weights.post_norm,
+            1e-6,
+            &mut post,
+        );
+        let gate = 1.0 / (1.0 + (-weights.attn_gate).exp());
+        for i in 0..D_MODEL {
+            state[range.start + i] = x[range.start + i] + gate * post[i];
+        }
+        let mut pre = vec![0.0; D_MODEL];
+        zc_rms_norm(&state[range.clone()], &weights.pre_hada, 1e-6, &mut pre);
+        let mut mlp = vec![0.0; D_MODEL];
+        hadamard_mlp(&pre, &weights.d1, &weights.d2, &weights.d3, &mut mlp);
+        for i in 0..D_MODEL {
+            out[range.start + i] = state[range.start + i] + mlp[i];
+        }
+    }
+}
+
 pub fn hadamard_mlp(x: &[f32], d1: &[f32], d2: &[f32], d3: &[f32], out: &mut [f32]) {
     assert_eq!(d1.len(), d2.len());
     assert_eq!(d2.len(), d3.len());
