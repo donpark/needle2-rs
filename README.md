@@ -7,13 +7,7 @@ separate.
 
 ## Status
 
-Experimental, but the real official `Cactus-Compute/needle2.cact` artifact is
-parsed and executed by the Rust implementation. Component tests cover the
-format, tokenizer, quantized tensors, attention, MLP, mHC, Engram, logits,
-tool generation, and WASM compilation.
-
-The scalar implementation is correctness-first and currently slow because
-completion recomputes the model for each generated token.
+EXPERIMENTAL and TEMPORARY.
 
 ## Crates
 
