@@ -403,7 +403,11 @@ pub fn decode_tool_calls(text: &str) -> Result<Vec<serde_json::Value>, String> {
         .map(|(body, _)| body)
         .unwrap_or(body)
         .trim();
-    let value: serde_json::Value = serde_json::from_str(body).map_err(|error| error.to_string())?;
+    let start = body
+        .find(['{', '['])
+        .ok_or_else(|| "missing JSON tool payload".to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(&body[start..]).map_err(|error| error.to_string())?;
     match value {
         serde_json::Value::Array(calls) => Ok(calls),
         serde_json::Value::Object(_) => Ok(vec![value]),
@@ -843,6 +847,12 @@ mod tests {
     fn decodes_single_and_multiple_tool_calls() {
         assert_eq!(
             decode_tool_calls("<tool_call>{\"name\":\"weather\"}</tool_call>")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            decode_tool_calls("reasoning {\"name\":\"weather\"}")
                 .unwrap()
                 .len(),
             1
