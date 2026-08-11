@@ -65,6 +65,63 @@ pub fn apply_rope(x: &mut [f32], cos: &[f32], sin: &[f32]) {
     }
 }
 
+pub fn gqa_attention(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    q_heads: usize,
+    kv_heads: usize,
+    seq_len: usize,
+    head_dim: usize,
+    causal: bool,
+    out: &mut [f32],
+) {
+    assert_eq!(q.len(), q_heads * seq_len * head_dim);
+    assert_eq!(k.len(), kv_heads * seq_len * head_dim);
+    assert_eq!(v.len(), k.len());
+    assert_eq!(out.len(), q.len());
+    assert_eq!(q_heads % kv_heads, 0);
+    let repeat = q_heads / kv_heads;
+    let scale = (head_dim as f32).sqrt().recip();
+    let mut scores = vec![0.0; seq_len];
+    for h in 0..q_heads {
+        let kv_h = h / repeat;
+        for t in 0..seq_len {
+            let q_base = (h * seq_len + t) * head_dim;
+            let end = if causal { t + 1 } else { seq_len };
+            let mut max_score = f32::NEG_INFINITY;
+            for s in 0..end {
+                let k_base = (kv_h * seq_len + s) * head_dim;
+                let score = q[q_base..q_base + head_dim]
+                    .iter()
+                    .zip(&k[k_base..k_base + head_dim])
+                    .map(|(a, b)| a * b)
+                    .sum::<f32>()
+                    * scale;
+                scores[s] = score;
+                max_score = max_score.max(score);
+            }
+            let mut total = 0.0;
+            for score in &mut scores[..end] {
+                *score = (*score - max_score).exp();
+                total += *score;
+            }
+            let out_base = q_base;
+            for d in 0..head_dim {
+                let mut value = 0.0;
+                for s in 0..end {
+                    value += scores[s] / total * v[(kv_h * seq_len + s) * head_dim + d];
+                }
+                out[out_base + d] = value;
+            }
+        }
+    }
+}
+
+pub fn silu(x: f32) -> f32 {
+    x / (1.0 + (-x).exp())
+}
+
 pub fn engram_indices(tokens: &[u32], orders: &[usize], heads: usize, slots: u32) -> Vec<u32> {
     const SEED: u32 = 0x9E37_79B9;
     const PRIME: u32 = 0x0100_0193;
@@ -125,5 +182,18 @@ mod tests {
                 1956, 4976
             ]
         );
+    }
+
+    #[test]
+    fn causal_gqa_cannot_see_future_values() {
+        let q = [1.0, 1.0, 1.0, 1.0];
+        let k = [1.0, 1.0, 1.0, 1.0];
+        let v = [2.0, 4.0, 8.0, 16.0];
+        let mut out = [0.0; 4];
+        gqa_attention(&q, &k, &v, 1, 1, 4, 1, true, &mut out);
+        assert!((out[0] - 2.0).abs() < 1e-6);
+        assert!(out[1] > 2.0 && out[1] < 4.0);
+        assert!(out[2] > out[1] && out[2] < 8.0);
+        assert!(out[3] > out[2] && out[3] < 16.0);
     }
 }
