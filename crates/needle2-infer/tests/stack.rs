@@ -1,7 +1,7 @@
 use needle2_format::CactModel;
 use needle2_infer::{
-    engram_forward, infer_logits, stack_forward, stack_mhc_forward, EngramWeights, D_MODEL,
-    VOCAB_SIZE,
+    engram_forward, infer_logits, stack_forward, stack_mhc_forward, ConfidenceWeights,
+    EngramWeights, D_MODEL, VOCAB_SIZE,
 };
 
 #[test]
@@ -19,6 +19,9 @@ fn runs_the_full_sequential_stack_on_official_model() {
     let mut mhc_output = vec![0.0; D_MODEL];
     stack_mhc_forward(&model, &[101], &input, 1, &mut mhc_output).expect("run mHC stack");
     assert!(mhc_output.iter().all(|value| value.is_finite()));
+    let confidence = ConfidenceWeights::from_cact(&model).expect("load confidence head");
+    assert_eq!(confidence.probes.len(), 8 * D_MODEL);
+    assert_eq!(confidence.proj.len(), 4096);
     let engram = EngramWeights::from_cact(&model, 0).expect("load engram");
     let mut key = vec![0.0; 3 * D_MODEL];
     let mut value = vec![0.0; key.len()];

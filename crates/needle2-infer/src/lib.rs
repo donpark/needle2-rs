@@ -15,6 +15,37 @@ pub const ENGRAM_SLOTS: usize = 8192;
 pub const ENGRAM_SUB_DIM: usize = 128;
 pub const ROPE_THETA: f32 = 100_000.0;
 
+pub struct ConfidenceWeights {
+    pub probes: Vec<f32>,
+    pub proj: Vec<f32>,
+    pub bias: f32,
+}
+
+impl ConfidenceWeights {
+    pub fn from_cact(
+        model: &needle2_format::CactModel<'_>,
+    ) -> Result<Self, needle2_format::CactError> {
+        let final_norm = LAYER_TENSOR_START + NUM_LAYERS * 14 + 9 + 8;
+        let manifest = model.tensor_f32(final_norm + 1)?;
+        let mut index = final_norm + 2;
+        for code in manifest {
+            if code as u32 == 2 {
+                return Ok(Self {
+                    probes: model.tensor_f32(index)?,
+                    proj: model.tensor_f32(index + 1)?,
+                    bias: model
+                        .tensor_f32(index + 2)?
+                        .first()
+                        .copied()
+                        .unwrap_or_default(),
+                });
+            }
+            index += 3;
+        }
+        Err(needle2_format::CactError::MissingTokenizer)
+    }
+}
+
 pub struct EngramWeights {
     pub tables: Vec<f32>,
     pub key_proj: Vec<f32>,
