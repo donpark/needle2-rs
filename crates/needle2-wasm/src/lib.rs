@@ -7,6 +7,34 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
+pub struct Needle2Runtime {
+    model: Vec<u8>,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl Needle2Runtime {
+    #[wasm_bindgen(constructor)]
+    pub fn new(model_bytes: &[u8]) -> Self {
+        Self {
+            model: model_bytes.to_vec(),
+        }
+    }
+
+    pub fn complete(
+        &self,
+        tools_json: &str,
+        query: &str,
+        max_new_tokens: usize,
+    ) -> Result<JsValue, JsValue> {
+        needle2_complete(&self.model, tools_json, query, max_new_tokens)
+    }
+
+    pub fn reset(&mut self) {}
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
 pub fn needle2_complete(
     model_bytes: &[u8],
     tools_json: &str,
@@ -18,6 +46,29 @@ pub fn needle2_complete(
     let calls = needle2_infer::generate_constrained(&model, tools_json, query, max_new_tokens)
         .map_err(|error| JsValue::from_str(&error))?;
     serde_wasm_bindgen::to_value(&calls).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Needle2Runtime {
+    model: Vec<u8>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Needle2Runtime {
+    pub fn new(model_bytes: &[u8]) -> Self {
+        Self {
+            model: model_bytes.to_vec(),
+        }
+    }
+    pub fn complete(
+        &self,
+        tools_json: &str,
+        query: &str,
+        max_new_tokens: usize,
+    ) -> Result<serde_json::Value, String> {
+        needle2_complete(&self.model, tools_json, query, max_new_tokens)
+    }
+    pub fn reset(&mut self) {}
 }
 
 #[cfg(not(target_arch = "wasm32"))]
