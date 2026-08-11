@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>needle2-rs browser smoke test</title>
+<pre id="output">running…</pre>
+<script type="module">
+import { Needle2Engine } from "../js/index.js";
+
+const output = document.querySelector("#output");
+const report = [];
+const check = (condition, message) => {
+  if (!condition) throw new Error(message);
+  report.push(`PASS ${message}`);
+};
+
+try {
+  const modelPath = new URLSearchParams(location.search).get("model");
+  if (!modelPath) throw new Error("missing ?model=/path/to/model.cact");
+
+  const modelResponse = await fetch(modelPath);
+  check(modelResponse.ok, `model fetch (${modelResponse.status})`);
+  const model = new Uint8Array(await modelResponse.arrayBuffer());
+  check(model.byteLength > 0, "model is non-empty");
+
+  const wasmUrl = new URL("wasm/needle.wasm", new URL("/", location.href)).href;
+  const engine = await Needle2Engine.load(model, { wasmUrl });
+  report.push("PASS engine loaded");
+
+  const tools = [
+    { name: "get_page_context", description: "Extract text and metadata from the current page", parameters: { type: "object", properties: { includeText: { type: "boolean" } } } },
+    { name: "summarize_page", description: "Summarize page text to 1-2 sentences using on-device AI", parameters: { type: "object", properties: { text: { type: "string" } } } },
+    { name: "lookup_posts", description: "Find related posts by semantic similarity", parameters: { type: "object", properties: { summary: { type: "string" }, url: { type: "string" } } } },
+    { name: "create_post", description: "Post a comment to the current page", parameters: { type: "object", properties: { body: { type: "string" }, post_type: { type: "string", enum: ["comment", "link"] }, tab: { type: "string", enum: ["general", "news", "youtube", "blog", "dev"] }, link_url: { type: "string" } } } },
+    { name: "list_matching_agents", description: "List agents attached to the current page or domain", parameters: { type: "object", properties: { url: { type: "string" }, host: { type: "string" } } } },
+  ];
+
+  engine.init(" ", JSON.stringify(tools));
+  const first = engine.complete("Are there similar posts?");
+  check(Array.isArray(first.function_calls), "completion has function_calls");
+  if (first.function_calls.length > 0) {
+    const call = first.function_calls[0];
+    check(tools.some(tool => tool.name === call.name), "tool name is from supplied tools");
+    check(call.arguments && typeof call.arguments === "object", "arguments is an object");
+  } else {
+    report.push("PASS empty call is valid model response");
+  }
+
+  engine.reset();
+  engine.init(" ", JSON.stringify(tools));
+  const second = engine.complete("Write a comment about this page");
+  check(Array.isArray(second.function_calls), "completion works after reset");
+
+  output.textContent = report.join("\n");
+} catch (error) {
+  output.textContent = `${report.join("\n")}\nFAIL ${error.stack || error}`;
+  throw error;
+}
+</script>
