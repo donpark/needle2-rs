@@ -21,4 +21,23 @@ fn parses_official_needle2_model_when_provided() {
             assert_eq!(values.len(), count, "tensor {index}");
         }
     }
+
+    let Some(expected_path) = std::env::var_os("NEEDLE2_CACT_EXPECTED") else {
+        eprintln!("SKIP: NEEDLE2_CACT_EXPECTED is not set");
+        return;
+    };
+    let expected: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(expected_path).expect("read expected tensor values"))
+            .expect("parse expected tensor values");
+    for (key, entry) in expected.as_object().expect("expected object") {
+        let index: usize = key.parse().expect("tensor index");
+        let actual = model.tensor_f32(index).expect("decode expected tensor");
+        let values = entry["values"].as_array().expect("expected values");
+        let max_diff = values
+            .iter()
+            .enumerate()
+            .map(|(i, value)| (actual[i] - value.as_f64().unwrap() as f32).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_diff < 1e-3, "tensor {index} max diff {max_diff}");
+    }
 }
