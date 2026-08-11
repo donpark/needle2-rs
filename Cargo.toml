@@ -2,6 +2,7 @@
 members = [
     "crates/needle-core",
     "crates/needle-infer",
+    "crates/needle2-format",
     "crates/needle-c",
     "crates/needle-wasm",
     "crates/needle-cli",
