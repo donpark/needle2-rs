@@ -14,4 +14,11 @@ fn parses_official_needle2_model_when_provided() {
         model.tokenizer.encode("what's it like in Lagos right now?"),
         [1039, 8075, 8049, 506, 848, 301, 441, 493, 370, 2553, 3170, 8100,]
     );
+    for (index, tensor) in model.tensors.iter().enumerate() {
+        if tensor.dtype == 3 {
+            let values = model.tensor_f32(index).expect("decode CQ tensor");
+            let count = tensor.shape[..tensor.ndim as usize].iter().product::<u32>() as usize;
+            assert_eq!(values.len(), count, "tensor {index}");
+        }
+    }
 }

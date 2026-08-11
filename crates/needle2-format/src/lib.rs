@@ -183,6 +183,140 @@ impl<'a> CactModel<'a> {
         self.bytes
             .get(t.offset as usize..(t.offset + t.nbytes) as usize)
     }
+
+    /// Decode one exported tensor into f32 values. CQ tensors use the codebook
+    /// and Walsh-Hadamard transform stored/defined by the public exporter.
+    pub fn tensor_f32(&self, index: usize) -> Result<Vec<f32>, CactError> {
+        let record = *self.tensors.get(index).ok_or(CactError::BadBounds)?;
+        let blob = self.tensor_bytes(index).ok_or(CactError::BadBounds)?;
+        let count = record.shape[..record.ndim as usize]
+            .iter()
+            .try_fold(1usize, |n, &d| n.checked_mul(d as usize))
+            .ok_or(CactError::BadShape)?;
+        match record.dtype {
+            DTYPE_FP16 => Ok(blob
+                .chunks_exact(2)
+                .map(|x| f16_to_f32(u16::from_le_bytes([x[0], x[1]])))
+                .collect()),
+            DTYPE_FP32 => Ok(blob
+                .chunks_exact(4)
+                .map(|x| f32::from_le_bytes(x.try_into().unwrap()))
+                .collect()),
+            DTYPE_CQ => dequantize_cq(blob, record, self.codebook, count),
+            _ => Err(CactError::UnsupportedDtype(record.dtype)),
+        }
+    }
+}
+
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = ((bits as u32 & 0x8000) << 16) as u32;
+    let exp = (bits >> 10) & 0x1f;
+    let frac = (bits & 0x03ff) as u32;
+    let value = if exp == 0 {
+        if frac == 0 {
+            sign
+        } else {
+            let mut f = frac;
+            let mut e = -14i32;
+            while f & 0x400 == 0 {
+                f <<= 1;
+                e -= 1;
+            }
+            sign | (((e + 127) as u32) << 23) | ((f & 0x3ff) << 13)
+        }
+    } else if exp == 0x1f {
+        sign | 0x7f80_0000 | (frac << 13)
+    } else {
+        sign | (((exp as i32 - 15 + 127) as u32) << 23) | (frac << 13)
+    };
+    f32::from_bits(value)
+}
+
+fn dequantize_cq(
+    blob: &[u8],
+    record: TensorRecord,
+    codebook: &[u8],
+    count: usize,
+) -> Result<Vec<f32>, CactError> {
+    if record.ndim != 2 || record.group_size == 0 || !matches!(record.bits, 2 | 3 | 4 | 5) {
+        return Err(CactError::BadShape);
+    }
+    let out = record.shape[0] as usize;
+    let input = record.shape[1] as usize;
+    let group = record.group_size as usize;
+    let padded = (input + group - 1) / group * group;
+    let bits = if record.bits == 5 {
+        2
+    } else {
+        record.bits as usize
+    };
+    let packed_row = padded * bits / 8;
+    let norm_offset = out.checked_mul(packed_row).ok_or(CactError::BadBounds)?;
+    if blob.len() < norm_offset + out * (padded / group) * 2 {
+        return Err(CactError::BadBounds);
+    }
+    let cb_f32: Vec<f32> = if record.bits == 5 {
+        let c = 1.2240064 / (group as f32).sqrt();
+        vec![-c, 0.0, c]
+    } else {
+        let cb_start = match record.bits {
+            2 => 0,
+            3 => 4,
+            4 => 12,
+            _ => unreachable!(),
+        };
+        let cb_len = 1usize << record.bits;
+        (0..cb_len)
+            .map(|i| {
+                f32::from_le_bytes(
+                    codebook[(cb_start + i) * 4..(cb_start + i + 1) * 4]
+                        .try_into()
+                        .unwrap(),
+                )
+            })
+            .collect()
+    };
+    let mut result = vec![0.0; count];
+    for row in 0..out {
+        for group_i in 0..padded / group {
+            let norm_pos = norm_offset + (row * (padded / group) + group_i) * 2;
+            let norm = f16_to_f32(u16::from_le_bytes([blob[norm_pos], blob[norm_pos + 1]]));
+            let mut rotated = vec![0.0f32; group];
+            for k in 0..group {
+                let bit = row * packed_row * 8 + group_i * group * bits + k * bits;
+                let mut idx = 0usize;
+                for b in 0..bits {
+                    let absolute = bit + b;
+                    idx |= (((blob[absolute / 8] >> (absolute % 8)) & 1) as usize) << b;
+                }
+                if record.bits == 5 {
+                    idx = match idx {
+                        3 => 0,
+                        0 => 1,
+                        1 => 2,
+                        _ => 1,
+                    };
+                }
+                rotated[k] = cb_f32[idx] * norm;
+            }
+            for j in 0..group {
+                let mut value = 0.0;
+                for k in 0..group {
+                    value += rotated[k]
+                        * if (j & k).count_ones() % 2 == 0 {
+                            1.0
+                        } else {
+                            -1.0
+                        };
+                }
+                let pos = row * input + group_i * group + j;
+                if pos < result.len() {
+                    result[pos] = value / (group as f32).sqrt();
+                }
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn parse_tokenizer(b: &[u8]) -> Result<Tokenizer, CactError> {
