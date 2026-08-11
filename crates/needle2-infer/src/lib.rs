@@ -389,6 +389,40 @@ pub fn stack_mhc_forward(
     Ok(())
 }
 
+pub fn render_tool_prompt(tools_json: &str, query: &str) -> String {
+    format!("<|im_start|>user\\n<tools>{tools_json}</tools>\\n{query}<|im_end|>\\n<|im_start|>assistant\\n")
+}
+
+pub fn generate_greedy(
+    model: &needle2_format::CactModel<'_>,
+    tools_json: &str,
+    query: &str,
+    max_new_tokens: usize,
+) -> Result<String, needle2_format::CactError> {
+    let prompt = render_tool_prompt(tools_json, query);
+    let mut tokens = vec![2u32];
+    tokens.extend(model.tokenizer.encode(&prompt));
+    let mut generated = Vec::new();
+    let mut logits = vec![0.0; VOCAB_SIZE * tokens.len()];
+    for _ in 0..max_new_tokens {
+        logits.resize(tokens.len() * VOCAB_SIZE, 0.0);
+        infer_logits(model, &tokens, &mut logits)?;
+        let start = (tokens.len() - 1) * VOCAB_SIZE;
+        let next = logits[start..start + VOCAB_SIZE]
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(i, _)| i as u32)
+            .unwrap();
+        if next == 1 {
+            break;
+        }
+        tokens.push(next);
+        generated.push(next);
+    }
+    Ok(model.tokenizer.decode(&generated))
+}
+
 pub fn infer_logits(
     model: &needle2_format::CactModel<'_>,
     tokens: &[u32],
@@ -774,6 +808,14 @@ mod tests {
             &mut out,
         );
         assert_eq!(out, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn renders_official_tool_prompt() {
+        assert_eq!(
+            render_tool_prompt("[{\"name\":\"weather\"}]", "hello"),
+            "<|im_start|>user\\n<tools>[{\"name\":\"weather\"}]</tools>\\nhello<|im_end|>\\n<|im_start|>assistant\\n"
+        );
     }
 
     #[test]
