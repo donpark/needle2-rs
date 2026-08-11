@@ -17,7 +17,7 @@ pub fn needle2_complete(
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let calls = needle2_infer::generate_constrained(&model, tools_json, query, max_new_tokens)
         .map_err(|error| JsValue::from_str(&error))?;
-    JsValue::from_serde(&calls).map_err(|error| JsValue::from_str(&error.to_string()))
+    serde_wasm_bindgen::to_value(&calls).map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
