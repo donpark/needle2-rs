@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Needle 2 transparent WASM smoke test</title>
+<pre id="status">loading</pre>
+<script type="module">
+  import init, { Needle2Runtime } from "../wasm/transparent/needle2_wasm.js";
+
+  const status = document.querySelector("#status");
+  const params = new URLSearchParams(location.search);
+  const modelUrl = params.get("model");
+  if (!modelUrl) throw new Error("missing ?model= URL");
+
+  try {
+    await init();
+    const bytes = new Uint8Array(await (await fetch(modelUrl)).arrayBuffer());
+    const runtime = new Needle2Runtime(bytes);
+    runtime.reset();
+    status.textContent = `loaded ${bytes.length} bytes`;
+
+    if (params.get("run") === "1") {
+      const tools = JSON.stringify([{
+        name: "get_weather",
+        description: "Get weather",
+        parameters: { type: "object", properties: { city: { type: "string" } } },
+      }]);
+      const calls = runtime.complete(tools, "what's it like in Lagos right now?", 1);
+      status.textContent = JSON.stringify(calls);
+    }
+  } catch (error) {
+    status.textContent = `error: ${error.stack || error}`;
+  }
+</script>
