@@ -389,6 +389,46 @@ pub fn stack_mhc_forward(
     Ok(())
 }
 
+pub fn confidence_from_cells(
+    cells: &[f32],
+    time: usize,
+    layers: usize,
+    probes: &[f32],
+    proj: &[f32],
+    bias: f32,
+) -> f32 {
+    assert_eq!(cells.len(), time * layers * D_MODEL);
+    assert_eq!(probes.len() % D_MODEL, 0);
+    let probe_count = probes.len() / D_MODEL;
+    assert_eq!(proj.len(), probe_count * D_MODEL);
+    let scale = (D_MODEL as f32).sqrt();
+    let mut pooled = vec![0.0; probes.len()];
+    for probe in 0..probe_count {
+        let mut scores = vec![0.0; time * layers];
+        let mut max_score = f32::NEG_INFINITY;
+        for cell in 0..scores.len() {
+            scores[cell] = cells[cell * D_MODEL..(cell + 1) * D_MODEL]
+                .iter()
+                .zip(&probes[probe * D_MODEL..(probe + 1) * D_MODEL])
+                .map(|(a, b)| a * b)
+                .sum::<f32>()
+                / scale;
+            max_score = max_score.max(scores[cell]);
+        }
+        let denom = scores
+            .iter()
+            .map(|score| (*score - max_score).exp())
+            .sum::<f32>();
+        for cell in 0..scores.len() {
+            let weight = (scores[cell] - max_score).exp() / denom;
+            for d in 0..D_MODEL {
+                pooled[probe * D_MODEL + d] += weight * cells[cell * D_MODEL + d];
+            }
+        }
+    }
+    bias + proj.iter().zip(pooled).map(|(a, b)| a * b).sum::<f32>()
+}
+
 pub fn render_tool_prompt(tools_json: &str, query: &str) -> String {
     format!("<|im_start|>user\\n<tools>{tools_json}</tools>\\n{query}<|im_end|>\\n<|im_start|>assistant\\n")
 }
@@ -977,6 +1017,13 @@ mod tests {
             &mut out,
         );
         assert_eq!(out, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn confidence_pool_matches_single_cell() {
+        let cells = vec![1.0; D_MODEL];
+        let score = confidence_from_cells(&cells, 1, 1, &cells, &cells, 2.0);
+        assert!((score - (D_MODEL as f32 + 2.0)).abs() < 1e-3);
     }
 
     #[test]
