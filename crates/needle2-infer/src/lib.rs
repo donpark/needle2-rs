@@ -8,7 +8,34 @@ pub const NUM_KV_HEADS: usize = 4;
 pub const HEAD_DIM: usize = 64;
 pub const VOCAB_SIZE: usize = 8192;
 pub const MHC_LANES: usize = 4;
+pub const ENGRAM_SITES: usize = 2;
+pub const ENGRAM_HEADS: usize = 2;
+pub const ENGRAM_ORDERS: [usize; 2] = [2, 3];
+pub const ENGRAM_SLOTS: usize = 8192;
+pub const ENGRAM_SUB_DIM: usize = 128;
 pub const ROPE_THETA: f32 = 100_000.0;
+
+pub struct EngramWeights {
+    pub tables: Vec<f32>,
+    pub key_proj: Vec<f32>,
+    pub value_proj: Vec<f32>,
+    pub taps: Vec<f32>,
+}
+
+impl EngramWeights {
+    pub fn from_cact(
+        model: &needle2_format::CactModel<'_>,
+        site: usize,
+    ) -> Result<Self, needle2_format::CactError> {
+        let base = LAYER_TENSOR_START + NUM_LAYERS * 14 + 9 + site * 4;
+        Ok(Self {
+            tables: model.tensor_f32(base)?,
+            key_proj: model.tensor_f32(base + 1)?,
+            value_proj: model.tensor_f32(base + 2)?,
+            taps: model.tensor_f32(base + 3)?,
+        })
+    }
+}
 
 pub struct MhcWeights {
     pub a_pre: Vec<f32>,
@@ -140,6 +167,55 @@ pub fn apply_rope(x: &mut [f32], cos: &[f32], sin: &[f32]) {
     for i in 0..half {
         x[i] = original[i] * cos[i] - original[half + i] * sin[i];
         x[half + i] = original[half + i] * cos[i] + original[i] * sin[i];
+    }
+}
+
+pub fn engram_forward(tokens: &[u32], weights: &EngramWeights, key: &mut [f32], value: &mut [f32]) {
+    let seq_len = tokens.len();
+    assert_eq!(key.len(), seq_len * D_MODEL);
+    assert_eq!(value.len(), key.len());
+    let indices = engram_indices(tokens, &ENGRAM_ORDERS, ENGRAM_HEADS, ENGRAM_SLOTS as u32);
+    let e = vec![0.0; ENGRAM_ORDERS.len() * ENGRAM_HEADS * ENGRAM_SUB_DIM];
+    let mut fetched = vec![0.0; e.len()];
+    let mut raw_value = vec![0.0; seq_len * D_MODEL];
+    for t in 0..seq_len {
+        for table in 0..ENGRAM_ORDERS.len() * ENGRAM_HEADS {
+            let order = ENGRAM_ORDERS[table / ENGRAM_HEADS];
+            let slot = if t + 1 >= order {
+                indices[t * ENGRAM_ORDERS.len() * ENGRAM_HEADS + table] as usize
+            } else {
+                0
+            };
+            let src = &weights.tables[(table * ENGRAM_SLOTS + slot) * ENGRAM_SUB_DIM
+                ..(table * ENGRAM_SLOTS + slot + 1) * ENGRAM_SUB_DIM];
+            fetched[table * ENGRAM_SUB_DIM..(table + 1) * ENGRAM_SUB_DIM].copy_from_slice(src);
+            if t + 1 < order {
+                fetched[table * ENGRAM_SUB_DIM..(table + 1) * ENGRAM_SUB_DIM].fill(0.0);
+            }
+        }
+        matvec(
+            &weights.key_proj,
+            D_MODEL,
+            e.len(),
+            &fetched,
+            &mut key[t * D_MODEL..(t + 1) * D_MODEL],
+        );
+        matvec(
+            &weights.value_proj,
+            D_MODEL,
+            e.len(),
+            &fetched,
+            &mut raw_value[t * D_MODEL..(t + 1) * D_MODEL],
+        );
+        value[t * D_MODEL..(t + 1) * D_MODEL].fill(0.0);
+        for tap in 0..4 {
+            if t >= tap {
+                for d in 0..D_MODEL {
+                    value[t * D_MODEL + d] +=
+                        weights.taps[tap * D_MODEL + d] * raw_value[(t - tap) * D_MODEL + d];
+                }
+            }
+        }
     }
 }
 
