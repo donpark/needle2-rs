@@ -364,6 +364,9 @@ dependencies = [
 [[package]]
 name = "needle2-format"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "num-traits"
