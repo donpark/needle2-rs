@@ -7,6 +7,10 @@
     ".": {
       "types": "./js/index.d.ts",
       "import": "./js/index.js"
+    },
+    "./transparent": {
+      "types": "./js/transparent.d.ts",
+      "import": "./js/transparent.js"
     }
   },
   "files": ["js", "wasm"],
