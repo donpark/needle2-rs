@@ -65,6 +65,40 @@ pub fn apply_rope(x: &mut [f32], cos: &[f32], sin: &[f32]) {
     }
 }
 
+pub fn matvec(weights: &[f32], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) {
+    assert_eq!(weights.len(), rows * cols);
+    assert_eq!(x.len(), cols);
+    assert_eq!(out.len(), rows);
+    for row in 0..rows {
+        out[row] = weights[row * cols..(row + 1) * cols]
+            .iter()
+            .zip(x)
+            .map(|(w, v)| w * v)
+            .sum();
+    }
+}
+
+pub fn hadamard_mlp(x: &[f32], d1: &[f32], d2: &[f32], d3: &[f32], out: &mut [f32]) {
+    assert_eq!(d1.len(), d2.len());
+    assert_eq!(d2.len(), d3.len());
+    assert_eq!(out.len(), x.len());
+    let width = d1.len();
+    assert!(width.is_power_of_two() && width >= x.len());
+    let mut z = vec![0.0; width];
+    z[..x.len()].copy_from_slice(x);
+    for i in 0..width {
+        z[i] *= d1[i];
+    }
+    hadamard_in_place(&mut z);
+    for i in 0..width {
+        z[i] = silu(d2[i] * z[i]);
+    }
+    hadamard_in_place(&mut z);
+    for (dst, (value, scale)) in out.iter_mut().zip(z.iter().zip(d3)) {
+        *dst = value * scale;
+    }
+}
+
 pub fn gqa_attention(
     q: &[f32],
     k: &[f32],
@@ -182,6 +216,26 @@ mod tests {
                 1956, 4976
             ]
         );
+    }
+
+    #[test]
+    fn matvec_is_row_major() {
+        let mut out = [0.0; 2];
+        matvec(&[1.0, 2.0, 3.0, 4.0], 2, 2, &[5.0, 6.0], &mut out);
+        assert_eq!(out, [17.0, 39.0]);
+    }
+
+    #[test]
+    fn hadamard_mlp_preserves_zero_when_output_gate_is_zero() {
+        let mut out = [1.0; 2];
+        hadamard_mlp(
+            &[1.0, 2.0],
+            &[1.0, 1.0, 1.0, 1.0],
+            &[1.0; 4],
+            &[0.0; 4],
+            &mut out,
+        );
+        assert_eq!(out, [0.0, 0.0]);
     }
 
     #[test]
