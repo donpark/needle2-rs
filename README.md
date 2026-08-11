@@ -7,6 +7,10 @@ browsers and other ESM environments with browser-compatible `fetch`.
 This repository is a deployment adapter. It does not reimplement the model,
 tokenizer, quantization, or training pipeline.
 
+## STATUS
+
+AI-generated so completely **EXPERIMENTAL!**.
+
 ## API
 
 ```js
