@@ -389,6 +389,36 @@ pub fn stack_mhc_forward(
     Ok(())
 }
 
+pub fn infer_logits(
+    model: &needle2_format::CactModel<'_>,
+    tokens: &[u32],
+    out: &mut [f32],
+) -> Result<(), needle2_format::CactError> {
+    let embedding = model.tensor_f32(0)?;
+    assert_eq!(embedding.len(), VOCAB_SIZE * D_MODEL);
+    assert_eq!(out.len(), tokens.len() * VOCAB_SIZE);
+    let mut input = vec![0.0; tokens.len() * D_MODEL];
+    let scale = (D_MODEL as f32).sqrt();
+    for (t, &token) in tokens.iter().enumerate() {
+        let row = &embedding[token as usize * D_MODEL..(token as usize + 1) * D_MODEL];
+        for d in 0..D_MODEL {
+            input[t * D_MODEL + d] = row[d] * scale;
+        }
+    }
+    let mut hidden = vec![0.0; input.len()];
+    stack_mhc_forward(model, tokens, &input, tokens.len(), &mut hidden)?;
+    for t in 0..tokens.len() {
+        for vocab in 0..VOCAB_SIZE {
+            out[t * VOCAB_SIZE + vocab] = hidden[t * D_MODEL..(t + 1) * D_MODEL]
+                .iter()
+                .zip(&embedding[vocab * D_MODEL..(vocab + 1) * D_MODEL])
+                .map(|(a, b)| a * b)
+                .sum();
+        }
+    }
+    Ok(())
+}
+
 pub fn stack_forward(
     model: &needle2_format::CactModel<'_>,
     x: &[f32],

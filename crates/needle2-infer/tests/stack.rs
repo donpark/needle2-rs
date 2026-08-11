@@ -1,5 +1,8 @@
 use needle2_format::CactModel;
-use needle2_infer::{engram_forward, stack_forward, stack_mhc_forward, EngramWeights, D_MODEL};
+use needle2_infer::{
+    engram_forward, infer_logits, stack_forward, stack_mhc_forward, EngramWeights, D_MODEL,
+    VOCAB_SIZE,
+};
 
 #[test]
 fn runs_the_full_sequential_stack_on_official_model() {
@@ -21,4 +24,7 @@ fn runs_the_full_sequential_stack_on_official_model() {
     let mut value = vec![0.0; key.len()];
     engram_forward(&[101, 202, 303], &engram, &mut key, &mut value);
     assert!(key.iter().chain(&value).all(|number| number.is_finite()));
+    let mut logits = vec![0.0; VOCAB_SIZE];
+    infer_logits(&model, &[101], &mut logits).expect("run logits");
+    assert!(logits.iter().all(|number| number.is_finite()));
 }
