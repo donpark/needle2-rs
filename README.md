@@ -7,7 +7,7 @@ separate.
 
 ## Status
 
-EXPERIMENTAL and TEMPORARY.
+**ARCHIVED** in favor of upstream `needle-rs` since it now supports needle2 model format.
 
 ## Crates
 
